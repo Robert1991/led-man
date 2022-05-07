@@ -3,6 +3,12 @@
 #include "ledMan.h"
 #include "lightshow.h"
 #include "floatingAverage.h"
+#include "WebServer.h"
+#include <DNSServer.h>
+#include <ESP8266WiFi.h>
+#include "ESPFileSystem.h"
+
+#include "LittleFS.h"
 
 #define SOUND_VELOCITY 0.034
 #define CM_TO_INCH 0.39370
@@ -34,9 +40,12 @@ LedMan *ledMan = new LedMan(shiftRegister1, shiftRegister2);
 
 pt lightShowThread;
 pt speedCalculationThread;
+pt webServerThread;
 
 static int lightShowDelay = 50;
 static int currentLightShowIndex = 0;
+
+DNSServer dnsServer;
 
 void setup()
 {
@@ -44,17 +53,51 @@ void setup()
 
   PT_INIT(&lightShowThread);
   PT_INIT(&speedCalculationThread);
+  PT_INIT(&webServerThread);
 
   ledMan->initialize();
 
   pinMode(ULTRA_SONIC_SENSOR_TRIGGER_PIN, OUTPUT);
   pinMode(ULTRA_SONIC_SENSOR_ECHO_PIN, INPUT);
+
+  dnsServer = setupSoftAccessPointWithDnsServer("LED_MAN", "explore.me");
+  configureWebServer();
+  mountFileSystem();
+
 }
 
 void loop()
 {
   PT_SCHEDULE(calculateLightShowSpeed(&speedCalculationThread));
   PT_SCHEDULE(iterateLightShow(&lightShowThread));
+  PT_SCHEDULE(loopWebServer(&webServerThread));
+}
+
+DNSServer setupSoftAccessPointWithDnsServer(String ssid, String domainName)
+{
+  Serial.print("Setting soft-AP ... ");
+  Serial.println(WiFi.softAP(ssid) ? "Ready" : "Failed!");
+  Serial.print("Soft-AP IP address = ");
+  Serial.println(WiFi.softAPIP());
+
+  const byte DNS_PORT = 53;
+  DNSServer dnsServer;
+  dnsServer.setErrorReplyCode(DNSReplyCode::ServerFailure);
+  dnsServer.start(DNS_PORT, domainName, WiFi.softAPIP());
+
+  return dnsServer;
+}
+
+int loopWebServer(struct pt *thread)
+{
+  PT_BEGIN(thread);
+  while (true)
+  {
+    dnsServer.processNextRequest();
+    handleWebServerClient();
+    PT_YIELD(thread);
+  }
+  PT_END(thread);
 }
 
 int calculateLightShowSpeed(struct pt *thread)
@@ -63,18 +106,11 @@ int calculateLightShowSpeed(struct pt *thread)
   while (true)
   {
     float distanceCm = measureDistance(thread);
-    // Serial.print("Distance (cm): ");
-    // Serial.println(distanceCm);
-
     int lightShowSpeedRatio = calculateLightShowSpeedRatio(distanceCm);
-    // Serial.print("Ratio: ");
-    // Serial.println(lightShowSpeedRatio);
-
     int smoothendLightShowSpeedRatio = floatingAverage(lightShowSpeedRatio);
-    Serial.print("Ratio Smooth: ");
-    Serial.println(smoothendLightShowSpeedRatio);
-
     lightShowDelay = (int)(300.0 * (smoothendLightShowSpeedRatio / 100.0));
+    Serial.print("Light Show Delay: ");
+    Serial.println(lightShowDelay);
 
     PT_YIELD(thread);
   }
@@ -94,11 +130,8 @@ int iterateLightShow(struct pt *thread)
       PT_SLEEP(thread, lightShowDelay);
     }
 
-    // Serial.print("currentLightShowSpeedDelay: ");
-    // Serial.println(lightShowDelay);
-
-    // Serial.print("light show index: ");
-    // Serial.println(currentLightShowIndex);
+    Serial.print("light show index: ");
+    Serial.println(currentLightShowIndex);
 
     currentLightShowIndex++;
     if (currentLightShowIndex == TOTAL_STEPS)
